@@ -1,0 +1,16 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+pylint = "*"
+numpy = "*"
+autopep8 = "*"
+
+[packages]
+neat-python = "*"
+pyyaml = "*"
+
+[requires]
+python_version = "3.7"
