@@ -41,12 +41,13 @@ except ImportError:
 
 import warnings
 import pdb
-from multiprocessing import Pool, Queue
+import multiprocessing
+from subprocess import Popen, PIPE
 
 settings.init()
 
 
-class ThreadedEvaluatorCustom(object):
+class ParrallelEvolution(object):
     """
     A threaded genome evaluator.
     Useful on python implementations without GIL (Global Interpreter Lock).
@@ -59,9 +60,9 @@ class ThreadedEvaluatorCustom(object):
         """
         self.num_workers = num_workers
         self.eval_function = eval_function
-        self.ports = clients
         self.workers = []
         self.working = False
+        self.clients = clients
         self.inqueue = queue.Queue()
         self.outqueue = queue.Queue()
 
@@ -80,7 +81,7 @@ class ThreadedEvaluatorCustom(object):
             self.stop()
 
     def start(self):
-        """Starts the worker threads"""
+        """Starts the worker threads each connected to specific vrep server"""
         if self.working:
             return
         self.working = True
@@ -88,12 +89,12 @@ class ThreadedEvaluatorCustom(object):
             w = threading.Thread(
                 name="Worker Thread #{i}".format(i=i),
                 target=self._worker,
-                args=(self.ports[i],),
+                args=(self.clients[i],),
             )
             w.daemon = True
             w.start()
             print("thread_id = {0} client_id = {1}".format(
-                w.getName(), self.ports[i]))
+                w.getName(), self.clients[i]))
             self.workers.append(w)
 
     def stop(self):
@@ -132,22 +133,11 @@ class ThreadedEvaluatorCustom(object):
             genome.fitness = fitness
 
 
-def port_initializer(q):
-    global client_id
-    client_id = q.get()
-    print("worked_id = {0} client_id = {1}".format(os.getpid(), client_id))
-
-
 def vrep_ports():
+    """Load the vrep ports"""
     with open("vrep_ports.yml", 'r') as f:
         portConfig = yaml.load(f)
     return portConfig['ports']
-
-
-def chunks(l, n):
-    """Yield successive n-sized chunks from l."""
-    for i in range(0, len(l), n):
-        yield l[i:i + n]
 
 
 def eval_genome(client_id, genome, config):
@@ -199,7 +189,6 @@ def eval_genome(client_id, genome, config):
             client_id, collision_handle, vrep.simx_opmode_buffer)
 
         individual.neuro_loop()
-        print(individual.sensor_activation)
         output = net.activate(individual.sensor_activation)
         # normalize motor wheel wheel_speeds [0.0, 2.0] - robot
         scaled_output = np.array([scale(xi, -2.0, 2.0) for xi in output])
@@ -262,7 +251,16 @@ def run(config_file):
     print('Neuroevolutionary program started!')
     # Just in case, close all opened connections
     vrep.simxFinish(-1)
+
     ports = vrep_ports()
+    abs_vrep = '~/Developer/vrep-edu/vrep.app/Contents/MacOS/vrep'
+    scene_vrep = '~/Developer/vrep-neat-parallel/responsable_arena.ttt'
+
+    FNULL = open(os.devnull, 'w')
+    vrep_servers = [Popen(
+        ['{0} -gREMOTEAPISERVERSERVICE_{1}_TRUE_TRUE {2}'.format(abs_vrep, port, scene_vrep)], shell=True, stdout=FNULL) for port in ports]
+
+    time.sleep(10)
 
     clients = [vrep.simxStart(
         '127.0.0.1',
@@ -271,9 +269,7 @@ def run(config_file):
         True,
         5000,
         5) for port in ports]
-
     print(clients)
-
     # Load configuration.
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
                          neat.DefaultSpeciesSet, neat.DefaultStagnation,
@@ -288,12 +284,13 @@ def run(config_file):
     p.add_reporter(stats)
     p.add_reporter(neat.Checkpointer(10))
 
-# Run for up to 300 generations.
-    kwargs = {'num_workers': 2, 'eval_function': eval_genome}
-    pe = ThreadedEvaluatorCustom(clients, 2, eval_genome)
-    winner = p.run(pe.evaluate, 10)
-    # save the winning genome.
+    # Run for up to N generations.
+    pe = ParrallelEvolution(clients, len(clients), eval_genome)
+    winner = p.run(pe.evaluate, 2)
+
     print('\nBest genome:\n{!s}'.format(winner))
+
+    _ = [server.kill() for server in vrep_servers]
 
 
 if __name__ == '__main__':
