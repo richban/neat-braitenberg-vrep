@@ -11,6 +11,8 @@ autopep8 = "*"
 [packages]
 neat-python = "*"
 pyyaml = "*"
+graphviz = "*"
+matplotlib = "*"
 
 [requires]
 python_version = "3.7"

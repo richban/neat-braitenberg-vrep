@@ -1,22 +1,21 @@
 from __future__ import print_function
+from helpers import f_wheel_center, \
+    f_straight_movements, scale, f_obstacle_dist
+from datetime import datetime, timedelta
+from neat import ThreadedEvaluator
+from robot import EvolvedRobot
+from subprocess import Popen
+import multiprocessing
+import numpy as np
+import visualize
+import settings
+import warnings
 import os
 import neat
 import vrep
-import numpy as np
-from datetime import datetime, timedelta
 import time
-import uuid
-from robot import EvolvedRobot
-from helpers import f_wheel_center, f_straight_movements, f_pain, scale
-import math
-from argparse import ArgumentParser
-import configparser
-import settings
-from functools import partial
-from neat import ThreadedEvaluator
-from neat import ParallelEvaluator
 import yaml
-from functools import partial
+
 try:
     # pylint: disable=import-error
     import Queue as queue
@@ -31,18 +30,6 @@ except ImportError:  # pragma: no cover
     HAVE_THREADS = False
 else:
     HAVE_THREADS = True
-
-try:
-    # pylint: disable=import-error
-    import Queue as queue
-except ImportError:
-    # pylint: disable=import-error
-    import queue
-
-import warnings
-import pdb
-import multiprocessing
-from subprocess import Popen, PIPE
 
 settings.init()
 
@@ -114,7 +101,8 @@ class ParrallelEvolution(object):
                 )
             except queue.Empty:
                 continue
-            f = self.eval_function(client_id, genome, config)
+            f = self.eval_function(client_id, genome, genome_id, config)
+            self.inqueue.task_done()
             self.outqueue.put((genome_id, genome, f))
 
     def evaluate(self, genomes, config):
@@ -125,6 +113,8 @@ class ParrallelEvolution(object):
         for genome_id, genome in genomes:
             p += 1
             self.inqueue.put((genome_id, genome, config))
+
+        self.inqueue.join()
 
         # assign the fitness back to each genome
         while p > 0:
@@ -140,29 +130,25 @@ def vrep_ports():
     return portConfig['ports']
 
 
-def eval_genome(client_id, genome, config):
-    print('process id = ', os.getpid())
+def eval_genome(client_id, genome, genome_id, config):
 
+    t = threading.currentThread()
     robot = EvolvedRobot(
-        None,
+        genome,
+        genome_id,
         client_id=client_id,
         id=None,
         op_mode=settings.OP_MODE)
 
     # Enable the synchronous mode
     vrep.simxSynchronous(client_id, True)
+
     if (vrep.simxStartSimulation(client_id, vrep.simx_opmode_oneshot) == -1):
         print(client_id, 'Failed to start the simulation')
         print('Program ended')
         return
 
-    robot.chromosome = genome
-    robot.wheel_speeds = np.array([])
-    robot.sensor_activation = np.array([])
-    robot.norm_wheel_speeds = np.array([])
     individual = robot
-    id = uuid.uuid1()
-
     start_position = None
     # collistion detection initialization
     _, collision_handle = vrep.simxGetCollisionHandle(
@@ -189,8 +175,11 @@ def eval_genome(client_id, genome, config):
             client_id, collision_handle, vrep.simx_opmode_buffer)
 
         individual.neuro_loop()
+
+        # feed the neural network
         output = net.activate(individual.sensor_activation)
-        # normalize motor wheel wheel_speeds [0.0, 2.0] - robot
+
+        # normalize motor wheel_speeds [-2.0, 2.0]
         scaled_output = np.array([scale(xi, -2.0, 2.0) for xi in output])
 
         if settings.DEBUG:
@@ -203,18 +192,21 @@ def eval_genome(client_id, genome, config):
 
         # Fitness function; each feature;
         # V - wheel center
-        V = f_wheel_center(output[0], output[1])
+        V = f_wheel_center(scaled_output, -2.0, 2.0)
+
         if settings.DEBUG:
             individual.logger.info('f_wheel_center {}'.format(V))
 
         # pleasure - straight movements
-        pleasure = f_straight_movements(output[0], output[1])
+        pleasure = f_straight_movements(scaled_output, 0.0, 4.0)
+
         if settings.DEBUG:
             individual.logger.info(
                 'f_straight_movements {}'.format(pleasure))
 
         # pain - closer to an obstacle more pain
-        pain = f_pain(individual.sensor_activation)
+        pain = f_obstacle_dist(individual.sensor_activation)
+
         if settings.DEBUG:
             individual.logger.info('f_pain {}'.format(pain))
 
@@ -222,11 +214,19 @@ def eval_genome(client_id, genome, config):
         fitness_t = V * pleasure * pain
         fitness_agg = np.append(fitness_agg, fitness_t)
 
+        if settings.SAVE_DATA:
+            with open(settings.PATH_NE + str(individual.genome_id) + '_fitness.txt', 'a') as f:
+                f.write('{0!s},{1},{2},{3},{4},{5},{6},{7},{8}\n'.format(
+                    individual.genome_id, scaled_output[0],
+                    scaled_output[1], output[0], output[1],
+                    V, pleasure, pain, fitness_t
+                ))
+
     # behavarioral fitness function
     fitness_bff = [np.sum(fitness_agg)]
 
     # tailored fitness function
-    fitness = fitness_bff[0]  # * fitness_aff[0]
+    fitness = fitness_bff[0]
 
     # Now send some data to V-REP in a non-blocking fashion:
     vrep.simxAddStatusbarMessage(
@@ -235,8 +235,8 @@ def eval_genome(client_id, genome, config):
     # Before closing the connection to V-REP, make sure that the last command sent out had time to arrive. You can guarantee this with (for example):
     vrep.simxGetPingTime(client_id)
 
-    print('%s fitness: %f | fitness_bff %f | fitness_aff %f' % (
-        str(id), fitness, fitness_bff[0], 0.0))
+    print('%s genome_id: %d fitness: %f' %
+          (t.getName(), individual.genome_id, fitness))
 
     if (vrep.simxStopSimulation(client_id, settings.OP_MODE) == -1):
         print('Failed to stop the simulation\n')
@@ -253,12 +253,15 @@ def run(config_file):
     vrep.simxFinish(-1)
 
     ports = vrep_ports()
-    abs_vrep = '~/Developer/vrep-edu/vrep.app/Contents/MacOS/vrep'
-    scene_vrep = '~/Developer/vrep-neat-parallel/responsable_arena.ttt'
+    vrep_abspath = '~/Developer/vrep-edu/vrep.app/Contents/MacOS/vrep'
+    vrep_scene = os.getcwd() + '/arena.ttt'
 
     FNULL = open(os.devnull, 'w')
+    # spawns multiple vrep instances
     vrep_servers = [Popen(
-        ['{0} -gREMOTEAPISERVERSERVICE_{1}_TRUE_TRUE {2}'.format(abs_vrep, port, scene_vrep)], shell=True, stdout=FNULL) for port in ports]
+        ['{0} -gREMOTEAPISERVERSERVICE_{1}_TRUE_TRUE {2}'
+            .format(vrep_abspath, port, vrep_scene)],
+        shell=True, stdout=FNULL) for port in ports]
 
     time.sleep(10)
 
@@ -269,7 +272,7 @@ def run(config_file):
         True,
         5000,
         5) for port in ports]
-    print(clients)
+
     # Load configuration.
     config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
                          neat.DefaultSpeciesSet, neat.DefaultStagnation,
@@ -286,11 +289,37 @@ def run(config_file):
 
     # Run for up to N generations.
     pe = ParrallelEvolution(clients, len(clients), eval_genome)
-    winner = p.run(pe.evaluate, 2)
+    winner = p.run(pe.evaluate, settings.N_GENERATIONS)
+
+    # stop the workers
+    pe.stop()
 
     print('\nBest genome:\n{!s}'.format(winner))
 
+    # stop vrep simulation
+    _ = [vrep.simxFinish(client) for client in clients]
+    # kill vrep instances
     _ = [server.kill() for server in vrep_servers]
+
+    node_names = {-1: 'A', -2: 'B', -3: 'C', -4: 'D', -5: 'E',
+                  -6: 'F', -7: 'G', -8: 'H', -9: 'I', -10: 'J',
+                  -11: 'K', -12: 'L', -13: 'M', -14: 'N', -15: 'O',
+                  -16: 'P', 0: 'LEFT', 1: 'RIGHT', }
+
+    visualize.draw_net(config, winner, True, node_names=node_names,
+                       filename=settings.PATH_NE+'network')
+
+    visualize.plot_stats(stats, ylog=False, view=False,
+                         filename=settings.PATH_NE+'feedforward-fitness.svg')
+    visualize.plot_species(
+        stats, view=False, filename=settings.PATH_NE+'feedforward-speciation.svg')
+
+    visualize.draw_net(config, winner, view=False, node_names=node_names,
+                       filename=settings.PATH_NE+'winner-feedforward.gv')
+    visualize.draw_net(config, winner, view=False, node_names=node_names,
+                       filename=settings.PATH_NE+'winner-feedforward-enabled.gv', show_disabled=False)
+    visualize.draw_net(config, winner, view=False, node_names=node_names,
+                       filename=settings.PATH_NE+'winner-feedforward-enabled-pruned.gv', show_disabled=False, prune_unused=False)
 
 
 if __name__ == '__main__':
