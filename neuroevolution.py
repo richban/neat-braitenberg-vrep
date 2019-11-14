@@ -31,6 +31,11 @@ except ImportError:  # pragma: no cover
 else:
     HAVE_THREADS = True
 
+try:
+    from yaml import CLoader as Loader
+except ImportError:
+    from yaml import Loader
+
 settings.init()
 
 
@@ -126,7 +131,7 @@ class ParrallelEvolution(object):
 def vrep_ports():
     """Load the vrep ports"""
     with open("vrep_ports.yml", 'r') as f:
-        portConfig = yaml.load(f)
+        portConfig = yaml.load(f, Loader=Loader)
     return portConfig['ports']
 
 
