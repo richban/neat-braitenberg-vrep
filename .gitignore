@@ -85,7 +85,6 @@ celerybeat-schedule
 # images
 */**/*.jpg
 */**/*.jpeg
-*/**/*.png
 
 # Environments
 .env
@@ -335,6 +334,8 @@ vision/corners/*.png
 vision/videos/*
 vision/cdata.json
 
+data
+.DS_Store
 # endfloat
 !scenes/*.ttt
 *.fff
