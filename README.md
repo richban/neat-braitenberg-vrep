@@ -38,3 +38,5 @@ Worker Thread #2 genome_id: 3 fitness: 53.216213
 ```
 
 ![alt text](/static/vrep.instances.png "Spawing 4 V-REP Instances")
+
+NOTE: Don't use `VREP` for neuroevoltion for simple applications - it's really heavy, many times crashes on Mac...
